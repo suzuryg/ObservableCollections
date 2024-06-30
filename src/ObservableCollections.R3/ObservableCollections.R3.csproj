@@ -20,7 +20,9 @@
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>
-		<PackageReference Include="R3" Version="1.0.0" />
+		<Reference Include="Suzuryg.FaceEmo.Ext.R3">
+			<HintPath>Dependencies\R3\netstandard2.1\Suzuryg.FaceEmo.Ext.R3.dll</HintPath>
+		</Reference>
 	</ItemGroup>
 
 	<ItemGroup>
