@@ -3,11 +3,11 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 
 namespace ObservableCollections
 {
-    public sealed partial class ObservableDictionary<TKey, TValue> : IDictionary<TKey, TValue>,
-        IReadOnlyObservableDictionary<TKey, TValue>
+    public sealed partial class ObservableDictionary<TKey, TValue> : IDictionary<TKey, TValue>, IReadOnlyObservableDictionary<TKey, TValue>
         where TKey : notnull
     {
         readonly Dictionary<TKey, TValue> dictionary;
@@ -18,12 +18,27 @@ namespace ObservableCollections
             this.dictionary = new Dictionary<TKey, TValue>();
         }
 
-        public ObservableDictionary(IEnumerable<KeyValuePair<TKey, TValue>> collection)
+        public ObservableDictionary(IEqualityComparer<TKey>? comparer)
         {
-#if NET6_0_OR_GREATER
-            this.dictionary = new Dictionary<TKey, TValue>(collection);
+            this.dictionary = new Dictionary<TKey, TValue>(comparer: comparer);
+        }
+
+        public ObservableDictionary(int capacity, IEqualityComparer<TKey>? comparer)
+        {
+            this.dictionary = new Dictionary<TKey, TValue>(capacity, comparer: comparer);
+        }
+
+        public ObservableDictionary(IEnumerable<KeyValuePair<TKey, TValue>> collection)
+            : this(collection, null)
+        {
+        }
+
+        public ObservableDictionary(IEnumerable<KeyValuePair<TKey, TValue>> collection, IEqualityComparer<TKey>? comparer)
+        {
+#if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
+            this.dictionary = new Dictionary<TKey, TValue>(collection: collection, comparer: comparer);
 #else
-            this.dictionary = new Dictionary<TKey, TValue>();
+            this.dictionary = new Dictionary<TKey, TValue>(comparer: comparer);
             foreach (var item in collection)
             {
                 dictionary.Add(item.Key, item.Value);
@@ -223,6 +238,17 @@ namespace ObservableCollections
         IEnumerator IEnumerable.GetEnumerator()
         {
             return GetEnumerator();
+        }
+
+        public IEqualityComparer<TKey> Comparer
+        {
+            get
+            {
+                lock (SyncRoot)
+                {
+                    return dictionary.Comparer;
+                }
+            }
         }
     }
 }
