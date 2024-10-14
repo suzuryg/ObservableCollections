@@ -4,40 +4,48 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "tag: git tag you want create. (sample 1.0.0)"
+        description: "Version number to checkout and merge (e.g., 1.0.0)"
         required: true
-      dry-run:
-        description: "dry-run: true will never create relase/nuget."
-        required: true
-        default: false
-        type: boolean
 
 jobs:
-  build-dotnet:
+  update-observable-collections-for-face-emo:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
-      - uses: Cysharp/Actions/.github/actions/setup-dotnet@main
-      # build and pack
-      - run: dotnet build -c Release -p:Version=${{ inputs.tag }}
-      - run: dotnet test -c Release --no-build
-      - run: dotnet pack -c Release --no-build -p:Version=${{ inputs.tag }} -o ./publish
-      # Store artifacts.
-      - uses: Cysharp/Actions/.github/actions/upload-artifact@main
-        with:
-          name: nuget
-          path: ./publish/
-          retention-days: 1
+      - name: Set up Git user
+        run: |
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-  # release
-  create-release:
-    needs: [build-dotnet]
-    uses: Cysharp/Actions/.github/workflows/create-release.yaml@main
-    with:
-      commit-id: ${{ github.sha }}
-      dry-run: ${{ inputs.dry-run }}
-      tag: ${{ inputs.tag }}
-      nuget-push: true
-      release-upload: false
-    secrets: inherit
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+        with:
+            fetch-depth: 0
+
+      - name: Fetch and merge ObservableCollections version
+        run: |
+          git remote add upstream https://github.com/Cysharp/ObservableCollections.git
+          git fetch upstream --tags
+          git checkout -b ${{ inputs.tag }} $(git rev-list -n 1 tags/${{ inputs.tag }})
+          git checkout add-update-workflow
+          git merge ${{ inputs.tag }}
+
+      - name: Setup .NET
+        uses: Cysharp/Actions/.github/actions/setup-dotnet@main
+
+      - name: Build the project
+        run: |
+          dotnet build src/ObservableCollections.R3/ObservableCollections.R3.csproj -c Release -f netstandard2.1 -p:Version=${{ inputs.tag }}
+          dotnet test src/ObservableCollections.R3/ObservableCollections.R3.csproj -c Release --no-build
+          ls src/ObservableCollections.R3/bin/Release/netstandard2.1
+          rm -rf src/ObservableCollections.R3/Build/netstandard2.1
+          mkdir src/ObservableCollections.R3/Build/netstandard2.1
+          cp -r src/ObservableCollections.R3/bin/Release/netstandard2.1/Suzuryg.FaceEmo.Ext.ObservableCollections* src/ObservableCollections.R3/Build/netstandard2.1/
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+            commit-message: Update build for FaceEmo to ${{ inputs.tag }}
+            title: Update face-emo branch to ${{ inputs.tag }}
+            body: |
+                - Merge tag ${{ inputs.tag }} into face-emo branch
+                - Update build for FaceEmo to ${{ inputs.tag }}
