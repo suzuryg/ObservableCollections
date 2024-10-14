@@ -20,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
             fetch-depth: 0
+            submodules: true
 
       - name: Fetch and merge ObservableCollections version
         run: |
@@ -28,6 +29,12 @@ jobs:
           git checkout -b ${{ inputs.tag }} $(git rev-list -n 1 tags/${{ inputs.tag }})
           git checkout face-emo
           git merge ${{ inputs.tag }}
+
+      - name: Update R3 submodule
+        run: |
+          cd R3
+          git fetch origin
+          git checkout face-emo
 
       - name: Setup .NET
         uses: Cysharp/Actions/.github/actions/setup-dotnet@main
