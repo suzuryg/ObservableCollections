@@ -50,6 +50,7 @@ ObservableCollections has not just a simple list, there are many more data struc
 If you want to handle each change event with Rx, you can monitor it with the following method by combining it with [R3](https://github.com/Cysharp/R3):
 
 ```csharp
+Observable<CollectionChangedEvent<T>> IObservableCollection<T>.ObserveChanged()
 Observable<CollectionAddEvent<T>> IObservableCollection<T>.ObserveAdd()
 Observable<CollectionRemoveEvent<T>> IObservableCollection<T>.ObserveRemove()
 Observable<CollectionReplaceEvent<T>> IObservableCollection<T>.ObserveReplace() 
@@ -237,7 +238,7 @@ class DescendantComaprer : IComparer<int>
 
 Reactive Extensions with R3
 ---
-Once the R3 extension package is installed, you can subscribe to `ObserveAdd`, `ObserveRemove`, `ObserveReplace`, `ObserveMove`, `ObserveReset`, `ObserveClear`, `ObserveReverse`, `ObserveSort` events as Rx, allowing you to compose events individually.
+Once the R3 extension package is installed, you can subscribe to `ObserveChanged`, `ObserveAdd`, `ObserveRemove`, `ObserveReplace`, `ObserveMove`, `ObserveReset`, `ObserveClear`, `ObserveReverse`, `ObserveSort`, `ObserveCounteChanged` events as Rx, allowing you to compose events individually.
 
 > dotnet add package [ObservableCollections.R3](https://www.nuget.org/packages/ObservableCollections.R3)
 
@@ -258,6 +259,8 @@ list.AddRange(new[] { 10, 20, 30 });
 ```
 
 Note that `ObserveReset` is used to subscribe to Clear, Reverse, and Sort operations in bulk.
+
+In addition to `IObservableCollection<T>`, there is also a subscription event for `ISynchronizedView<T, TView>`. In the case of View, `ObserveRejected` is also added.
 
 Since it is not supported by dotnet/reactive, please use the Rx library [R3](https://github.com/Cysharp/R3).
 
@@ -317,7 +320,7 @@ Because of data binding in WPF, it is important that the collection is Observabl
 // WPF simple sample.
 
 ObservableList<int> list;
-public INotifyCollectionChangedSynchronizedViewList<int> ItemsView { get; set; }
+public NotifyCollectionChangedSynchronizedViewList<int> ItemsView { get; set; }
 
 public MainWindow()
 {
@@ -366,8 +369,8 @@ public delegate T WritableViewChangedEventHandler<T, TView>(TView newView, T ori
 
 public interface IWritableSynchronizedView<T, TView> : ISynchronizedView<T, TView>
 {
-    INotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged(WritableViewChangedEventHandler<T, TView> converter);
-    INotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged(WritableViewChangedEventHandler<T, TView> converter, ICollectionEventDispatcher? collectionEventDispatcher);
+    NotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged(WritableViewChangedEventHandler<T, TView> converter);
+    NotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged(WritableViewChangedEventHandler<T, TView> converter, ICollectionEventDispatcher? collectionEventDispatcher);
 }
 ```
 
@@ -441,7 +444,7 @@ public class SampleScript : MonoBehaviour
     public Button prefab;
     public GameObject root;
     ObservableRingBuffer<int> collection;
-    ISynchronizedView<GameObject> view;
+    ISynchronizedView<int, GameObject> view;
 
     void Start()
     {
@@ -459,10 +462,10 @@ public class SampleScript : MonoBehaviour
         view.ViewChanged += View_ViewChanged;
     }
 
-    void View_ViewChanged(in SynchronizedViewChangedEventArgs<int, string> eventArgs)
+    void View_ViewChanged(in SynchronizedViewChangedEventArgs<int, GameObject> eventArgs)
     {
         // hook remove event
-        if (NotifyCollectionChangedAction.Remove)
+        if (eventArgs.Action == NotifyCollectionChangedAction.Remove)
         {
             GameObject.Destroy(eventArgs.OldItem.View);
         }
@@ -552,7 +555,7 @@ public enum RejectedViewChangedAction
 public interface ISynchronizedView<T, TView> : IReadOnlyCollection<TView>, IDisposable
 {
     object SyncRoot { get; }
-    ISynchronizedViewFilter<T> Filter { get; }
+    ISynchronizedViewFilter<T, TView> Filter { get; }
     IEnumerable<(T Value, TView View)> Filtered { get; }
     IEnumerable<(T Value, TView View)> Unfiltered { get; }
     int UnfilteredCount { get; }
@@ -561,11 +564,11 @@ public interface ISynchronizedView<T, TView> : IReadOnlyCollection<TView>, IDisp
     event Action<RejectedViewChangedAction, int, int>? RejectedViewChanged; // int index, int oldIndex(when RejectedViewChangedAction is Move)
     event Action<NotifyCollectionChangedAction>? CollectionStateChanged;
 
-    void AttachFilter(ISynchronizedViewFilter<T> filter);
+    void AttachFilter(ISynchronizedViewFilter<T, TView> filter);
     void ResetFilter();
     ISynchronizedViewList<TView> ToViewList();
-    INotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged();
-    INotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged(ICollectionEventDispatcher? collectionEventDispatcher);
+    NotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged();
+    NotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged(ICollectionEventDispatcher? collectionEventDispatcher);
 }
 ```
 
@@ -610,14 +613,18 @@ When `IsReverse` is true, you need to use `Index` and `Count`. When `IsSort` is 
 For Filter, you can either create one that implements this interface or generate one from a lambda expression using extension methods.
 
 ```csharp
-public interface ISynchronizedViewFilter<T>
+public interface ISynchronizedViewFilter<T, TView>
 {
-    bool IsMatch(T value);
+    bool IsMatch(T value, TView view);
 }
 
 public static class SynchronizedViewExtensions
 {
     public static void AttachFilter<T, TView>(this ISynchronizedView<T, TView> source, Func<T, bool> filter)
+    {
+    }
+    
+    public static void AttachFilter<T, TView>(this ISynchronizedView<T, TView> source, Func<T, TView, bool> filter)
     {
     }
 }
@@ -630,10 +637,10 @@ public sealed partial class ObservableList<T>
 {
     public IWritableSynchronizedView<T, TView> CreateWritableView<TView>(Func<T, TView> transform);
 
-    public INotifyCollectionChangedSynchronizedViewList<T> ToWritableNotifyCollectionChanged();
-    public INotifyCollectionChangedSynchronizedViewList<T> ToWritableNotifyCollectionChanged(ICollectionEventDispatcher? collectionEventDispatcher);
-    public INotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged<TView>(Func<T, TView> transform, WritableViewChangedEventHandler<T, TView>? converter);
-    public INotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged<TView>(Func<T, TView> transform, ICollectionEventDispatcher? collectionEventDispatcher, WritableViewChangedEventHandler<T, TView>? converter);
+    public NotifyCollectionChangedSynchronizedViewList<T> ToWritableNotifyCollectionChanged();
+    public NotifyCollectionChangedSynchronizedViewList<T> ToWritableNotifyCollectionChanged(ICollectionEventDispatcher? collectionEventDispatcher);
+    public NotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged<TView>(Func<T, TView> transform, WritableViewChangedEventHandler<T, TView>? converter);
+    public NotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged<TView>(Func<T, TView> transform, ICollectionEventDispatcher? collectionEventDispatcher, WritableViewChangedEventHandler<T, TView>? converter);
 }
 
 public delegate T WritableViewChangedEventHandler<T, TView>(TView newView, T originalValue, ref bool setValue);
@@ -643,6 +650,11 @@ public interface IWritableSynchronizedView<T, TView> : ISynchronizedView<T, TVie
     (T Value, TView View) GetAt(int index);
     void SetViewAt(int index, TView view);
     void SetToSourceCollection(int index, T value);
+    void AddToSourceCollection(T value);
+    void InsertIntoSourceCollection(int index, T value);
+    bool RemoveFromSourceCollection(T value);
+    void RemoveAtSourceCollection(int index);
+    void ClearSourceCollection();
     IWritableSynchronizedViewList<TView> ToWritableViewList(WritableViewChangedEventHandler<T, TView> converter);
     INotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged(WritableViewChangedEventHandler<T, TView> converter);
     INotifyCollectionChangedSynchronizedViewList<TView> ToWritableNotifyCollectionChanged(WritableViewChangedEventHandler<T, TView> converter, ICollectionEventDispatcher? collectionEventDispatcher);
@@ -671,9 +683,18 @@ public interface ISynchronizedViewList<out TView> : IReadOnlyList<TView>, IDispo
 {
 }
 
+// Obsolete for public use
 public interface INotifyCollectionChangedSynchronizedViewList<out TView> : ISynchronizedViewList<TView>, INotifyCollectionChanged, INotifyPropertyChanged
 {
 }
+
+public abstract class NotifyCollectionChangedSynchronizedViewList<TView> :
+    INotifyCollectionChangedSynchronizedViewList<TView>,
+    IWritableSynchronizedViewList<TView>,
+    IList<TView>,
+    IList
+    {
+    }
 ```
 
 License
