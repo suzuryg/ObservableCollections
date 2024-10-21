@@ -7,7 +7,7 @@ using System.Linq;
 
 namespace ObservableCollections
 {
-    public sealed partial class ObservableDictionary<TKey, TValue>
+    public partial class ObservableDictionary<TKey, TValue>
     {
         public ISynchronizedView<KeyValuePair<TKey, TValue>, TView> CreateView<TView>(Func<KeyValuePair<TKey, TValue>, TView> transform)
         {
@@ -19,7 +19,7 @@ namespace ObservableCollections
         {
             readonly ObservableDictionary<TKey, TValue> source;
             readonly Func<KeyValuePair<TKey, TValue>, TView> selector;
-            ISynchronizedViewFilter<KeyValuePair<TKey, TValue>> filter;
+            ISynchronizedViewFilter<KeyValuePair<TKey, TValue>, TView> filter;
             readonly Dictionary<TKey, (TValue, TView)> dict;
             int filteredCount;
 
@@ -27,7 +27,7 @@ namespace ObservableCollections
             {
                 this.source = source;
                 this.selector = selector;
-                this.filter = SynchronizedViewFilter<KeyValuePair<TKey, TValue>>.Null;
+                this.filter = SynchronizedViewFilter<KeyValuePair<TKey, TValue>, TView>.Null;
                 this.SyncRoot = new object();
                 lock (source.SyncRoot)
                 {
@@ -42,7 +42,7 @@ namespace ObservableCollections
             public event Action<RejectedViewChangedAction, int, int>? RejectedViewChanged;
             public event Action<NotifyCollectionChangedAction>? CollectionStateChanged;
 
-            public ISynchronizedViewFilter<KeyValuePair<TKey, TValue>> Filter
+            public ISynchronizedViewFilter<KeyValuePair<TKey, TValue>, TView> Filter
             {
                 get { lock (SyncRoot) return filter; }
             }
@@ -74,7 +74,7 @@ namespace ObservableCollections
                 this.source.CollectionChanged -= SourceCollectionChanged;
             }
 
-            public void AttachFilter(ISynchronizedViewFilter<KeyValuePair<TKey, TValue>> filter)
+            public void AttachFilter(ISynchronizedViewFilter<KeyValuePair<TKey, TValue>, TView> filter)
             {
                 if (filter.IsNullFilter())
                 {
@@ -89,7 +89,7 @@ namespace ObservableCollections
                     foreach (var v in dict)
                     {
                         var value = new KeyValuePair<TKey, TValue>(v.Key, v.Value.Item1);
-                        if (filter.IsMatch(value))
+                        if (filter.IsMatch(value, v.Value.Item2))
                         {
                             filteredCount++;
                         }
@@ -103,7 +103,7 @@ namespace ObservableCollections
             {
                 lock (SyncRoot)
                 {
-                    this.filter = SynchronizedViewFilter<KeyValuePair<TKey, TValue>>.Null;
+                    this.filter = SynchronizedViewFilter<KeyValuePair<TKey, TValue>, TView>.Null;
                     this.filteredCount = dict.Count;
                     ViewChanged?.Invoke(new SynchronizedViewChangedEventArgs<KeyValuePair<TKey, TValue>, TView>(NotifyCollectionChangedAction.Reset, true));
                 }
@@ -111,17 +111,17 @@ namespace ObservableCollections
 
             public ISynchronizedViewList<TView> ToViewList()
             {
-                return new FiltableSynchronizedViewList<KeyValuePair<TKey, TValue>, TView>(this);
+                return new FiltableSynchronizedViewList<KeyValuePair<TKey, TValue>, TView>(this, isSupportRangeFeature: true);
             }
 
-            public INotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged()
+            public NotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged()
             {
-                return new NotifyCollectionChangedSynchronizedViewList<KeyValuePair<TKey, TValue>, TView>(this, null);
+                return new FiltableSynchronizedViewList<KeyValuePair<TKey, TValue>, TView>(this, isSupportRangeFeature: false);
             }
 
-            public INotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged(ICollectionEventDispatcher? collectionEventDispatcher)
+            public NotifyCollectionChangedSynchronizedViewList<TView> ToNotifyCollectionChanged(ICollectionEventDispatcher? collectionEventDispatcher)
             {
-                return new NotifyCollectionChangedSynchronizedViewList<KeyValuePair<TKey, TValue>, TView>(this, collectionEventDispatcher);
+                return new FiltableSynchronizedViewList<KeyValuePair<TKey, TValue>, TView>(this, isSupportRangeFeature: false, collectionEventDispatcher);
             }
 
             public IEnumerator<TView> GetEnumerator()
@@ -131,7 +131,7 @@ namespace ObservableCollections
                     foreach (var item in dict)
                     {
                         var v = (new KeyValuePair<TKey, TValue>(item.Key, item.Value.Item1), item.Value.Item2);
-                        if (filter.IsMatch(v.Item1))
+                        if (filter.IsMatch(v))
                         {
                             yield return v.Item2;
                         }
@@ -150,7 +150,7 @@ namespace ObservableCollections
                         foreach (var item in dict)
                         {
                             var v = (new KeyValuePair<TKey, TValue>(item.Key, item.Value.Item1), item.Value.Item2);
-                            if (filter.IsMatch(v.Item1))
+                            if (filter.IsMatch(v))
                             {
                                 yield return v;
                             }

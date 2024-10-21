@@ -1,27 +1,35 @@
 using ObservableCollections.Internal;
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace ObservableCollections;
 
-internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TView>
+internal sealed class FiltableSynchronizedViewList<T, TView> : NotifyCollectionChangedSynchronizedViewList<TView>
 {
-    protected readonly ISynchronizedView<T, TView> parent;
-    protected readonly AlternateIndexList<TView> listView;
-    protected readonly object gate = new object();
+    static readonly PropertyChangedEventArgs CountPropertyChangedEventArgs = new("Count");
+    static readonly Action<NotifyCollectionChangedEventArgs> raiseChangedEventInvoke = RaiseChangedEvent;
 
-    protected virtual bool IsSupportRangeFeature => true;
+    readonly ISynchronizedView<T, TView> parent;
+    readonly AlternateIndexList<TView> listView;
+    readonly bool isSupportRangeFeature; // WPF, Avalonia etc does not support range notification
 
-    public FiltableSynchronizedViewList(ISynchronizedView<T, TView> parent)
+    readonly ICollectionEventDispatcher eventDispatcher;
+    readonly WritableViewChangedEventHandler<T, TView>? converter; // null = readonly
+
+    public override event NotifyCollectionChangedEventHandler? CollectionChanged;
+    public override event PropertyChangedEventHandler? PropertyChanged;
+
+    public FiltableSynchronizedViewList(ISynchronizedView<T, TView> parent, bool isSupportRangeFeature, ICollectionEventDispatcher? eventDispatcher = null, WritableViewChangedEventHandler<T, TView>? converter = null)
     {
         this.parent = parent;
+        this.isSupportRangeFeature = isSupportRangeFeature;
+        this.eventDispatcher = eventDispatcher ?? InlineCollectionEventDispatcher.Instance;
+        this.converter = converter;
         lock (parent.SyncRoot)
         {
             listView = new AlternateIndexList<TView>(IterateFilteredIndexedViewsOfParent());
@@ -46,7 +54,7 @@ internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TV
         {
             foreach (var item in parent.Unfiltered) // use Unfiltered
             {
-                if (filter.IsMatch(item.Value))
+                if (filter.IsMatch(item))
                 {
                     yield return (index, item.View);
                 }
@@ -82,7 +90,7 @@ internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TV
                     }
                     else
                     {
-                        if (IsSupportRangeFeature)
+                        if (isSupportRangeFeature)
                         {
                             using var array = new CloneCollection<TView>(e.NewViews);
                             var index = listView.InsertRange(e.NewStartingIndex, array.AsEnumerable());
@@ -127,7 +135,7 @@ internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TV
                             }
                             else
                             {
-                                if (IsSupportRangeFeature)
+                                if (isSupportRangeFeature)
                                 {
                                     index = listView.RemoveRange(e.OldStartingIndex, e.OldViews.Length);
                                 }
@@ -223,11 +231,102 @@ internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TV
         }
     }
 
-    protected virtual void OnCollectionChanged(in SynchronizedViewChangedEventArgs<T, TView> args)
+    void OnCollectionChanged(in SynchronizedViewChangedEventArgs<T, TView> args)
     {
+        if (CollectionChanged == null && PropertyChanged == null) return;
+
+        switch (args.Action)
+        {
+            case NotifyCollectionChangedAction.Add:
+                if (args.IsSingleItem)
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewItem.View, args.NewStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                else
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewViews.ToArray(), args.NewStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                break;
+            case NotifyCollectionChangedAction.Remove:
+                if (args.IsSingleItem)
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldItem.View, args.OldStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                else
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldViews.ToArray(), args.OldStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                break;
+            case NotifyCollectionChangedAction.Reset:
+                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Reset)
+                {
+                    Collection = this,
+                    Invoker = raiseChangedEventInvoke,
+                    IsInvokeCollectionChanged = true,
+                    IsInvokePropertyChanged = true
+                });
+                break;
+            case NotifyCollectionChangedAction.Replace:
+                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Replace, args.NewItem.View, args.OldItem.View, args.NewStartingIndex)
+                {
+                    Collection = this,
+                    Invoker = raiseChangedEventInvoke,
+                    IsInvokeCollectionChanged = true,
+                    IsInvokePropertyChanged = false
+                });
+                break;
+            case NotifyCollectionChangedAction.Move:
+                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Move, args.NewItem.View, args.NewStartingIndex, args.OldStartingIndex)
+                {
+                    Collection = this,
+                    Invoker = raiseChangedEventInvoke,
+                    IsInvokeCollectionChanged = true,
+                    IsInvokePropertyChanged = false
+                });
+                break;
+        }
     }
 
-    public TView this[int index]
+    static void RaiseChangedEvent(NotifyCollectionChangedEventArgs e)
+    {
+        var e2 = (CollectionEventDispatcherEventArgs)e;
+        var self = (FiltableSynchronizedViewList<T, TView>)e2.Collection;
+
+        if (e2.IsInvokeCollectionChanged)
+        {
+            self.CollectionChanged?.Invoke(self, e);
+        }
+        if (e2.IsInvokePropertyChanged)
+        {
+            self.PropertyChanged?.Invoke(self, CountPropertyChangedEventArgs);
+        }
+    }
+
+    public override TView this[int index]
     {
         get
         {
@@ -236,9 +335,34 @@ internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TV
                 return listView[index];
             }
         }
+        set
+        {
+            if (IsReadOnly)
+            {
+                throw new NotSupportedException("This CollectionView does not support Set. If base type is ObservableList<T>, you can use CreateWritableView and ToWritableNotifyCollectionChanged.");
+            }
+            else
+            {
+                var writableView = parent as IWritableSynchronizedView<T, TView>;
+                var originalIndex = listView.GetAlternateIndex(index);
+                var (originalValue, _) = writableView!.GetAt(originalIndex);
+
+                // update view
+                writableView.SetViewAt(originalIndex, value);
+                listView[index] = value;
+
+                var setValue = true;
+                var newOriginal = converter!(value, originalValue, ref setValue);
+
+                if (setValue)
+                {
+                    writableView.SetToSourceCollection(originalIndex, newOriginal);
+                }
+            }
+        }
     }
 
-    public int Count
+    public override int Count
     {
         get
         {
@@ -249,7 +373,9 @@ internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TV
         }
     }
 
-    public IEnumerator<TView> GetEnumerator()
+    public override bool IsReadOnly => converter == null || parent is not IWritableSynchronizedView<T, TView>;
+
+    public override IEnumerator<TView> GetEnumerator()
     {
         lock (gate)
         {
@@ -260,33 +386,162 @@ internal class FiltableSynchronizedViewList<T, TView> : ISynchronizedViewList<TV
         }
     }
 
-    IEnumerator IEnumerable.GetEnumerator()
+    public override void Add(TView item)
     {
-        return GetEnumerator();
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Add. If base type is ObservableList<T>, you can use CreateWritableView and ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            if (typeof(T) == typeof(TView) && item is T tItem)
+            {
+                writableView!.AddToSourceCollection(tItem);
+                return;
+            }
+            var setValue = false;
+            var newOriginal = converter!(item, default!, ref setValue);
+
+            // always add
+            writableView!.AddToSourceCollection(newOriginal);
+        }
     }
 
-    public void Dispose()
+    public override void Insert(int index, TView item)
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Insert. If base type is ObservableList<T>, you can use CreateWritableView and ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            if (typeof(T) == typeof(TView) && item is T tItem)
+            {
+                writableView!.InsertIntoSourceCollection(index, tItem);
+                return;
+            }
+            var setValue = false;
+            var newOriginal = converter!(item, default!, ref setValue);
+
+            writableView!.InsertIntoSourceCollection(index, newOriginal);
+        }
+    }
+
+    public override bool Remove(TView item)
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Remove. If base type is ObservableList<T>, you can use CreateWritableView and ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            if (typeof(T) == typeof(TView) && item is T tItem)
+            {
+                return writableView!.RemoveFromSourceCollection(tItem);
+            }
+            var setValue = false;
+            var newOriginal = converter!(item, default!, ref setValue);
+
+            // always add
+            return writableView!.RemoveFromSourceCollection(newOriginal);
+        }
+    }
+
+    public override void RemoveAt(int index)
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support RemoveAt. If base type is ObservableList<T>, you can use CreateWritableView and ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            writableView!.RemoveAtSourceCollection(index);
+        }
+    }
+
+    public override void Clear()
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Clear. If base type is ObservableList<T>, you can use CreateWritableView and ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            writableView!.ClearSourceCollection();
+        }
+    }
+
+    public override bool Contains(TView item)
+    {
+        lock (gate)
+        {
+            foreach (var listItem in listView)
+            {
+                if (EqualityComparer<TView>.Default.Equals(listItem, item))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public override int IndexOf(TView item)
+    {
+        lock (gate)
+        {
+            var index = 0;
+            foreach (var listItem in listView)
+            {
+                if (EqualityComparer<TView>.Default.Equals(listItem, item))
+                {
+                    return index;
+                }
+                index++;
+            }
+        }
+        return -1;
+    }
+
+    public override void Dispose()
     {
         parent.ViewChanged -= Parent_ViewChanged;
         parent.RejectedViewChanged -= Parent_RejectedViewChanged;
     }
 }
 
-internal class NonFilteredSynchronizedViewList<T, TView> : ISynchronizedViewList<TView>
+internal sealed class NonFilteredSynchronizedViewList<T, TView> : NotifyCollectionChangedSynchronizedViewList<TView>
 {
-    protected readonly ISynchronizedView<T, TView> parent;
-    protected readonly List<TView> listView; // no filter can be faster
-    protected readonly object gate = new object();
+    static readonly PropertyChangedEventArgs CountPropertyChangedEventArgs = new("Count");
+    static readonly Action<NotifyCollectionChangedEventArgs> raiseChangedEventInvoke = RaiseChangedEvent;
 
-    protected virtual bool IsSupportRangeFeature => true;
+    readonly ISynchronizedView<T, TView> parent;
+    readonly List<TView> listView; // no filter can be faster
+    readonly bool isSupportRangeFeature; // WPF, Avalonia etc does not support range notification
 
-    public NonFilteredSynchronizedViewList(ISynchronizedView<T, TView> parent)
+    readonly ICollectionEventDispatcher eventDispatcher;
+    readonly WritableViewChangedEventHandler<T, TView>? converter; // null = readonly
+
+    public override event NotifyCollectionChangedEventHandler? CollectionChanged;
+    public override event PropertyChangedEventHandler? PropertyChanged;
+
+
+    public NonFilteredSynchronizedViewList(ISynchronizedView<T, TView> parent, bool isSupportRangeFeature, ICollectionEventDispatcher? eventDispatcher, WritableViewChangedEventHandler<T, TView>? converter)
     {
         this.parent = parent;
+        this.isSupportRangeFeature = isSupportRangeFeature;
+        this.eventDispatcher = eventDispatcher ?? InlineCollectionEventDispatcher.Instance;
+        this.converter = converter;
         lock (parent.SyncRoot)
         {
-            listView = parent.ToList(); // iterate filtered
+            listView = parent.ToList(); // guranteed non-filtered
             parent.ViewChanged += Parent_ViewChanged;
+            // no register RejectedViewChanged(beacuse non filtered)
         }
     }
 
@@ -314,7 +569,7 @@ internal class NonFilteredSynchronizedViewList<T, TView> : ISynchronizedViewList
                     }
                     else
                     {
-                        if (IsSupportRangeFeature)
+                        if (isSupportRangeFeature)
                         {
 #if NET8_0_OR_GREATER
                             listView.InsertRange(e.NewStartingIndex, e.NewViews);
@@ -367,7 +622,7 @@ internal class NonFilteredSynchronizedViewList<T, TView> : ISynchronizedViewList
                             }
                             else
                             {
-                                if (IsSupportRangeFeature)
+                                if (isSupportRangeFeature)
                                 {
                                     listView.RemoveRange(e.OldStartingIndex, e.OldViews.Length);
                                 }
@@ -478,11 +733,102 @@ internal class NonFilteredSynchronizedViewList<T, TView> : ISynchronizedViewList
         }
     }
 
-    protected virtual void OnCollectionChanged(in SynchronizedViewChangedEventArgs<T, TView> args)
+    void OnCollectionChanged(in SynchronizedViewChangedEventArgs<T, TView> args)
     {
+        if (CollectionChanged == null && PropertyChanged == null) return;
+
+        switch (args.Action)
+        {
+            case NotifyCollectionChangedAction.Add:
+                if (args.IsSingleItem)
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewItem.View, args.NewStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                else
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewViews.ToArray(), args.NewStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                break;
+            case NotifyCollectionChangedAction.Remove:
+                if (args.IsSingleItem)
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldItem.View, args.OldStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                else
+                {
+                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldViews.ToArray(), args.OldStartingIndex)
+                    {
+                        Collection = this,
+                        Invoker = raiseChangedEventInvoke,
+                        IsInvokeCollectionChanged = true,
+                        IsInvokePropertyChanged = true
+                    });
+                }
+                break;
+            case NotifyCollectionChangedAction.Reset:
+                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Reset)
+                {
+                    Collection = this,
+                    Invoker = raiseChangedEventInvoke,
+                    IsInvokeCollectionChanged = true,
+                    IsInvokePropertyChanged = true
+                });
+                break;
+            case NotifyCollectionChangedAction.Replace:
+                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Replace, args.NewItem.View, args.OldItem.View, args.NewStartingIndex)
+                {
+                    Collection = this,
+                    Invoker = raiseChangedEventInvoke,
+                    IsInvokeCollectionChanged = true,
+                    IsInvokePropertyChanged = false
+                });
+                break;
+            case NotifyCollectionChangedAction.Move:
+                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Move, args.NewItem.View, args.NewStartingIndex, args.OldStartingIndex)
+                {
+                    Collection = this,
+                    Invoker = raiseChangedEventInvoke,
+                    IsInvokeCollectionChanged = true,
+                    IsInvokePropertyChanged = false
+                });
+                break;
+        }
     }
 
-    public TView this[int index]
+    static void RaiseChangedEvent(NotifyCollectionChangedEventArgs e)
+    {
+        var e2 = (CollectionEventDispatcherEventArgs)e;
+        var self = (NonFilteredSynchronizedViewList<T, TView>)e2.Collection;
+
+        if (e2.IsInvokeCollectionChanged)
+        {
+            self.CollectionChanged?.Invoke(self, e);
+        }
+        if (e2.IsInvokePropertyChanged)
+        {
+            self.PropertyChanged?.Invoke(self, CountPropertyChangedEventArgs);
+        }
+    }
+
+    public override TView this[int index]
     {
         get
         {
@@ -491,9 +837,33 @@ internal class NonFilteredSynchronizedViewList<T, TView> : ISynchronizedViewList
                 return listView[index];
             }
         }
+        set
+        {
+            if (IsReadOnly)
+            {
+                throw new NotSupportedException("This CollectionView does not support set. If base type is ObservableList<T>, you can use ToWritableNotifyCollectionChanged.");
+            }
+            else
+            {
+                var writableView = parent as IWritableSynchronizedView<T, TView>;
+                var (originalValue, _) = writableView!.GetAt(index);
+
+                // update view
+                writableView.SetViewAt(index, value);
+                listView[index] = value;
+
+                var setValue = true;
+                var newOriginal = converter!(value, originalValue, ref setValue);
+
+                if (setValue)
+                {
+                    writableView.SetToSourceCollection(index, newOriginal);
+                }
+            }
+        }
     }
 
-    public int Count
+    public override int Count
     {
         get
         {
@@ -504,7 +874,9 @@ internal class NonFilteredSynchronizedViewList<T, TView> : ISynchronizedViewList
         }
     }
 
-    public IEnumerator<TView> GetEnumerator()
+    public override bool IsReadOnly => converter == null || parent is not IWritableSynchronizedView<T, TView>;
+
+    public override IEnumerator<TView> GetEnumerator()
     {
         lock (gate)
         {
@@ -515,630 +887,131 @@ internal class NonFilteredSynchronizedViewList<T, TView> : ISynchronizedViewList
         }
     }
 
-    IEnumerator IEnumerable.GetEnumerator()
+    public override void Add(TView item)
     {
-        return GetEnumerator();
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Add. If base type is ObservableList<T>, you can use ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            if (typeof(T) == typeof(TView) && item is T tItem)
+            {
+                writableView!.AddToSourceCollection(tItem);
+                return;
+            }
+            var setValue = false;
+            var newOriginal = converter!(item, default!, ref setValue);
+
+            // always add
+            writableView!.AddToSourceCollection(newOriginal);
+        }
     }
 
-    public void Dispose()
+    public override void Insert(int index, TView item)
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Insert. If base type is ObservableList<T>, you can use ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            if (typeof(T) == typeof(TView) && item is T tItem)
+            {
+                writableView!.InsertIntoSourceCollection(index, tItem);
+                return;
+            }
+            var setValue = false;
+            var newOriginal = converter!(item, default!, ref setValue);
+
+            writableView!.InsertIntoSourceCollection(index, newOriginal);
+        }
+    }
+
+    public override bool Remove(TView item)
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Remove. If base type is ObservableList<T>, you can use ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            if (typeof(T) == typeof(TView) && item is T tItem)
+            {
+                return writableView!.RemoveFromSourceCollection(tItem);
+            }
+            var setValue = false;
+            var newOriginal = converter!(item, default!, ref setValue);
+
+            // always add
+            return writableView!.RemoveFromSourceCollection(newOriginal);
+        }
+    }
+
+    public override void RemoveAt(int index)
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support RemoveAt. If base type is ObservableList<T>, you can use ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            writableView!.RemoveAtSourceCollection(index);
+        }
+    }
+
+    public override void Clear()
+    {
+        if (IsReadOnly)
+        {
+            throw new NotSupportedException("This CollectionView does not support Clear. If base type is ObservableList<T>, you can use ToWritableNotifyCollectionChanged.");
+        }
+        else
+        {
+            var writableView = parent as IWritableSynchronizedView<T, TView>;
+            writableView!.ClearSourceCollection();
+        }
+    }
+
+    public override bool Contains(TView item)
+    {
+        lock (gate)
+        {
+            foreach (var listItem in listView)
+            {
+                if (EqualityComparer<TView>.Default.Equals(listItem, item))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public override int IndexOf(TView item)
+    {
+        lock (gate)
+        {
+            var index = 0;
+            foreach (var listItem in listView)
+            {
+                if (EqualityComparer<TView>.Default.Equals(listItem, item))
+                {
+                    return index;
+                }
+                index++;
+            }
+        }
+        return -1;
+    }
+
+    public override void Dispose()
     {
         parent.ViewChanged -= Parent_ViewChanged;
         parent.Dispose(); // Dispose parent
-    }
-}
-
-internal class FiltableWritableSynchronizedViewList<T, TView> : FiltableSynchronizedViewList<T, TView>, IWritableSynchronizedViewList<TView>
-{
-    IWritableSynchronizedView<T, TView> writableView;
-    WritableViewChangedEventHandler<T, TView> converter;
-
-    public FiltableWritableSynchronizedViewList(IWritableSynchronizedView<T, TView> parent, WritableViewChangedEventHandler<T, TView> converter) : base(parent)
-    {
-        this.writableView = parent;
-        this.converter = converter;
-    }
-
-    public new TView this[int index]
-    {
-        get => base[index];
-        set
-        {
-            lock (gate)
-            {
-                var originalIndex = listView.GetAlternateIndex(index);
-                var (originalValue, _) = writableView.GetAt(originalIndex);
-
-                // update view
-                writableView.SetViewAt(originalIndex, value);
-                listView[index] = value;
-
-                var setValue = true;
-                var newOriginal = converter(value, originalValue, ref setValue);
-
-                if (setValue)
-                {
-                    writableView.SetToSourceCollection(originalIndex, newOriginal);
-                }
-            }
-        }
-    }
-}
-
-internal class NotifyCollectionChangedSynchronizedViewList<T, TView> :
-    FiltableSynchronizedViewList<T, TView>,
-    INotifyCollectionChangedSynchronizedViewList<TView>,
-    IList<TView>, IList
-{
-    static readonly PropertyChangedEventArgs CountPropertyChangedEventArgs = new("Count");
-    static readonly Action<NotifyCollectionChangedEventArgs> raiseChangedEventInvoke = RaiseChangedEvent;
-
-    readonly ICollectionEventDispatcher eventDispatcher;
-    WritableViewChangedEventHandler<T, TView>? converter; // null = readonly
-
-    protected override bool IsSupportRangeFeature => false; // WPF, Avalonia etc does not support range notification
-
-    public event NotifyCollectionChangedEventHandler? CollectionChanged;
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    public NotifyCollectionChangedSynchronizedViewList(ISynchronizedView<T, TView> parent, ICollectionEventDispatcher? eventDispatcher)
-        : base(parent)
-    {
-        this.eventDispatcher = eventDispatcher ?? InlineCollectionEventDispatcher.Instance;
-    }
-
-    public NotifyCollectionChangedSynchronizedViewList(ISynchronizedView<T, TView> parent, ICollectionEventDispatcher? eventDispatcher, WritableViewChangedEventHandler<T, TView>? converter)
-        : base(parent)
-    {
-        this.eventDispatcher = eventDispatcher ?? InlineCollectionEventDispatcher.Instance;
-        this.converter = converter;
-    }
-
-    protected override void OnCollectionChanged(in SynchronizedViewChangedEventArgs<T, TView> args)
-    {
-        if (CollectionChanged == null && PropertyChanged == null) return;
-
-        switch (args.Action)
-        {
-            case NotifyCollectionChangedAction.Add:
-                if (args.IsSingleItem)
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewItem.View, args.NewStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                else
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewViews.ToArray(), args.NewStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                break;
-            case NotifyCollectionChangedAction.Remove:
-                if (args.IsSingleItem)
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldItem.View, args.OldStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                else
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldViews.ToArray(), args.OldStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                break;
-            case NotifyCollectionChangedAction.Reset:
-                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Reset)
-                {
-                    Collection = this,
-                    Invoker = raiseChangedEventInvoke,
-                    IsInvokeCollectionChanged = true,
-                    IsInvokePropertyChanged = true
-                });
-                break;
-            case NotifyCollectionChangedAction.Replace:
-                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Replace, args.NewItem.View, args.OldItem.View, args.NewStartingIndex)
-                {
-                    Collection = this,
-                    Invoker = raiseChangedEventInvoke,
-                    IsInvokeCollectionChanged = true,
-                    IsInvokePropertyChanged = false
-                });
-                break;
-            case NotifyCollectionChangedAction.Move:
-                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Move, args.NewItem.View, args.NewStartingIndex, args.OldStartingIndex)
-                {
-                    Collection = this,
-                    Invoker = raiseChangedEventInvoke,
-                    IsInvokeCollectionChanged = true,
-                    IsInvokePropertyChanged = false
-                });
-                break;
-        }
-    }
-
-    static void RaiseChangedEvent(NotifyCollectionChangedEventArgs e)
-    {
-        var e2 = (CollectionEventDispatcherEventArgs)e;
-        var self = (NotifyCollectionChangedSynchronizedViewList<T, TView>)e2.Collection;
-
-        if (e2.IsInvokeCollectionChanged)
-        {
-            self.CollectionChanged?.Invoke(self, e);
-        }
-        if (e2.IsInvokePropertyChanged)
-        {
-            self.PropertyChanged?.Invoke(self, CountPropertyChangedEventArgs);
-        }
-    }
-
-    // IList<T>, IList implementation
-
-    TView IList<TView>.this[int index]
-    {
-        get => ((IReadOnlyList<TView>)this)[index];
-        set
-        {
-            if (converter == null || parent is not IWritableSynchronizedView<T, TView> writableView)
-            {
-                throw new NotSupportedException("This CollectionView does not support set. If base type is ObservableList<T>, you can use ToWritableSynchronizedView and ToWritableNotifyCollectionChanged.");
-            }
-            else
-            {
-                var originalIndex = listView.GetAlternateIndex(index);
-                var (originalValue, _) = writableView.GetAt(originalIndex);
-
-                // update view
-                writableView.SetViewAt(originalIndex, value);
-                listView[index] = value;
-
-                var setValue = true;
-                var newOriginal = converter(value, originalValue, ref setValue);
-
-                if (setValue)
-                {
-                    writableView.SetToSourceCollection(originalIndex, newOriginal);
-                }
-            }
-        }
-    }
-
-    object? IList.this[int index]
-    {
-        get
-        {
-            return this[index];
-        }
-        set => ((IList<TView>)this)[index] = (TView)value!;
-    }
-
-    static bool IsCompatibleObject(object? value)
-    {
-        return value is TView || value == null && default(TView) == null;
-    }
-
-    public bool IsReadOnly => true;
-
-    public bool IsFixedSize => false;
-
-    public bool IsSynchronized => true;
-
-    public object SyncRoot => gate;
-
-    public void Add(TView item)
-    {
-        if (converter == null || parent is not IWritableSynchronizedView<T, TView> writableView)
-        {
-            throw new NotSupportedException("This CollectionView does not support Add. If base type is ObservableList<T>, you can use ToWritableSynchronizedView and ToWritableNotifyCollectionChanged.");
-        }
-        else
-        {
-            var setValue = false;
-            var newOriginal = converter(item, default!, ref setValue);
-
-            // always add
-            writableView.AddToSourceCollection(newOriginal);
-        }
-    }
-
-    public int Add(object? value)
-    {
-        Add((TView)value!);
-        return -1; // itself does not add in this collection
-    }
-
-    public void Clear()
-    {
-        throw new NotSupportedException();
-    }
-
-    public bool Contains(TView item)
-    {
-        lock (gate)
-        {
-            foreach (var listItem in listView)
-            {
-                if (EqualityComparer<TView>.Default.Equals(listItem, item))
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    public bool Contains(object? value)
-    {
-        if (IsCompatibleObject(value))
-        {
-            return Contains((TView)value!);
-        }
-        return false;
-    }
-
-    public void CopyTo(TView[] array, int arrayIndex)
-    {
-        throw new NotSupportedException();
-    }
-
-    public void CopyTo(Array array, int index)
-    {
-        throw new NotImplementedException();
-    }
-
-    public int IndexOf(TView item)
-    {
-        lock (gate)
-        {
-            var index = 0;
-            foreach (var listItem in listView)
-            {
-                if (EqualityComparer<TView>.Default.Equals(listItem, item))
-                {
-                    return index;
-                }
-                index++;
-            }
-        }
-        return -1;
-    }
-
-    public int IndexOf(object? item)
-    {
-        if (IsCompatibleObject(item))
-        {
-            return IndexOf((TView)item!);
-        }
-        return -1;
-    }
-
-    public void Insert(int index, TView item)
-    {
-        throw new NotSupportedException();
-    }
-
-    public void Insert(int index, object? value)
-    {
-        throw new NotImplementedException();
-    }
-
-    public bool Remove(TView item)
-    {
-        throw new NotSupportedException();
-    }
-
-    public void Remove(object? value)
-    {
-        throw new NotImplementedException();
-    }
-
-    public void RemoveAt(int index)
-    {
-        throw new NotSupportedException();
-    }
-}
-
-internal class NonFilteredNotifyCollectionChangedSynchronizedViewList<T, TView> :
-    NonFilteredSynchronizedViewList<T, TView>,
-    INotifyCollectionChangedSynchronizedViewList<TView>,
-    IList<TView>, IList
-{
-    static readonly PropertyChangedEventArgs CountPropertyChangedEventArgs = new("Count");
-    static readonly Action<NotifyCollectionChangedEventArgs> raiseChangedEventInvoke = RaiseChangedEvent;
-
-    readonly ICollectionEventDispatcher eventDispatcher;
-    readonly WritableViewChangedEventHandler<T, TView>? converter; // null = readonly
-
-    public event NotifyCollectionChangedEventHandler? CollectionChanged;
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    protected override bool IsSupportRangeFeature => false; // WPF, Avalonia etc does not support range notification
-
-    public NonFilteredNotifyCollectionChangedSynchronizedViewList(ISynchronizedView<T, TView> parent, ICollectionEventDispatcher? eventDispatcher)
-        : base(parent)
-    {
-        this.eventDispatcher = eventDispatcher ?? InlineCollectionEventDispatcher.Instance;
-    }
-
-    public NonFilteredNotifyCollectionChangedSynchronizedViewList(ISynchronizedView<T, TView> parent, ICollectionEventDispatcher? eventDispatcher, WritableViewChangedEventHandler<T, TView>? converter)
-        : base(parent)
-    {
-        this.eventDispatcher = eventDispatcher ?? InlineCollectionEventDispatcher.Instance;
-        this.converter = converter;
-    }
-
-    protected override void OnCollectionChanged(in SynchronizedViewChangedEventArgs<T, TView> args)
-    {
-        if (CollectionChanged == null && PropertyChanged == null) return;
-
-        switch (args.Action)
-        {
-            case NotifyCollectionChangedAction.Add:
-                if (args.IsSingleItem)
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewItem.View, args.NewStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                else
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Add, args.NewViews.ToArray(), args.NewStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                break;
-            case NotifyCollectionChangedAction.Remove:
-                if (args.IsSingleItem)
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldItem.View, args.OldStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                else
-                {
-                    eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Remove, args.OldViews.ToArray(), args.OldStartingIndex)
-                    {
-                        Collection = this,
-                        Invoker = raiseChangedEventInvoke,
-                        IsInvokeCollectionChanged = true,
-                        IsInvokePropertyChanged = true
-                    });
-                }
-                break;
-            case NotifyCollectionChangedAction.Reset:
-                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Reset)
-                {
-                    Collection = this,
-                    Invoker = raiseChangedEventInvoke,
-                    IsInvokeCollectionChanged = true,
-                    IsInvokePropertyChanged = true
-                });
-                break;
-            case NotifyCollectionChangedAction.Replace:
-                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Replace, args.NewItem.View, args.OldItem.View, args.NewStartingIndex)
-                {
-                    Collection = this,
-                    Invoker = raiseChangedEventInvoke,
-                    IsInvokeCollectionChanged = true,
-                    IsInvokePropertyChanged = false
-                });
-                break;
-            case NotifyCollectionChangedAction.Move:
-                eventDispatcher.Post(new CollectionEventDispatcherEventArgs(NotifyCollectionChangedAction.Move, args.NewItem.View, args.NewStartingIndex, args.OldStartingIndex)
-                {
-                    Collection = this,
-                    Invoker = raiseChangedEventInvoke,
-                    IsInvokeCollectionChanged = true,
-                    IsInvokePropertyChanged = false
-                });
-                break;
-        }
-    }
-
-    static void RaiseChangedEvent(NotifyCollectionChangedEventArgs e)
-    {
-        var e2 = (CollectionEventDispatcherEventArgs)e;
-        var self = (NonFilteredNotifyCollectionChangedSynchronizedViewList<T, TView>)e2.Collection;
-
-        if (e2.IsInvokeCollectionChanged)
-        {
-            self.CollectionChanged?.Invoke(self, e);
-        }
-        if (e2.IsInvokePropertyChanged)
-        {
-            self.PropertyChanged?.Invoke(self, CountPropertyChangedEventArgs);
-        }
-    }
-
-    // IList<T>, IList implementation
-
-    TView IList<TView>.this[int index]
-    {
-        get => ((IReadOnlyList<TView>)this)[index];
-        set
-        {
-            if (converter == null || parent is not IWritableSynchronizedView<T, TView> writableView)
-            {
-                throw new NotSupportedException("This CollectionView does not support set. If base type is ObservableList<T>, you can use ToWritableSynchronizedView and ToWritableNotifyCollectionChanged.");
-            }
-            else
-            {
-                var (originalValue, _) = writableView.GetAt(index);
-
-                // update view
-                writableView.SetViewAt(index, value);
-                listView[index] = value;
-
-                var setValue = true;
-                var newOriginal = converter(value, originalValue, ref setValue);
-
-                if (setValue)
-                {
-                    writableView.SetToSourceCollection(index, newOriginal);
-                }
-            }
-        }
-    }
-
-    object? IList.this[int index]
-    {
-        get
-        {
-            return this[index];
-        }
-        set => ((IList<TView>)this)[index] = (TView)value!;
-    }
-
-    static bool IsCompatibleObject(object? value)
-    {
-        return value is TView || value == null && default(TView) == null;
-    }
-
-    public bool IsReadOnly => true;
-
-    public bool IsFixedSize => false;
-
-    public bool IsSynchronized => true;
-
-    public object SyncRoot => gate;
-
-    public void Add(TView item)
-    {
-        if (converter == null || parent is not IWritableSynchronizedView<T, TView> writableView)
-        {
-            throw new NotSupportedException("This CollectionView does not support Add. If base type is ObservableList<T>, you can use ToWritableSynchronizedView and ToWritableNotifyCollectionChanged.");
-        }
-        else
-        {
-            var setValue = false;
-            var newOriginal = converter(item, default!, ref setValue);
-
-            // always add
-            writableView.AddToSourceCollection(newOriginal);
-        }
-    }
-
-    public int Add(object? value)
-    {
-        Add((TView)value!);
-        return -1; // itself does not add in this collection
-    }
-
-    public void Clear()
-    {
-        throw new NotSupportedException();
-    }
-
-    public bool Contains(TView item)
-    {
-        lock (gate)
-        {
-            foreach (var listItem in listView)
-            {
-                if (EqualityComparer<TView>.Default.Equals(listItem, item))
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    public bool Contains(object? value)
-    {
-        if (IsCompatibleObject(value))
-        {
-            return Contains((TView)value!);
-        }
-        return false;
-    }
-
-    public void CopyTo(TView[] array, int arrayIndex)
-    {
-        throw new NotSupportedException();
-    }
-
-    public void CopyTo(Array array, int index)
-    {
-        throw new NotImplementedException();
-    }
-
-    public int IndexOf(TView item)
-    {
-        lock (gate)
-        {
-            var index = 0;
-            foreach (var listItem in listView)
-            {
-                if (EqualityComparer<TView>.Default.Equals(listItem, item))
-                {
-                    return index;
-                }
-                index++;
-            }
-        }
-        return -1;
-    }
-
-    public int IndexOf(object? item)
-    {
-        if (IsCompatibleObject(item))
-        {
-            return IndexOf((TView)item!);
-        }
-        return -1;
-    }
-
-    public void Insert(int index, TView item)
-    {
-        throw new NotSupportedException();
-    }
-
-    public void Insert(int index, object? value)
-    {
-        throw new NotImplementedException();
-    }
-
-    public bool Remove(TView item)
-    {
-        throw new NotSupportedException();
-    }
-
-    public void Remove(object? value)
-    {
-        throw new NotImplementedException();
-    }
-
-    public void RemoveAt(int index)
-    {
-        throw new NotSupportedException();
     }
 }

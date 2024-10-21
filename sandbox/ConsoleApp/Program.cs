@@ -17,7 +17,7 @@ var list = new ObservableList<Person>()
 var view = list.CreateWritableView(x => x.Name);
 view.AttachFilter(x => x.Age >= 20);
 
-IList<string?> bindable = view.ToWritableNotifyCollectionChanged((string? newView, Person original, ref bool setValue) =>
+var bindable = view.ToWritableNotifyCollectionChanged((string? newView, Person original, ref bool setValue) =>
 {
     if (setValue)
     {
@@ -38,6 +38,11 @@ IList<string?> bindable = view.ToWritableNotifyCollectionChanged((string? newVie
         return new Person { Age = null, Name = newView };
     }
 });
+
+
+list.Clear();
+
+list.Add(new() { Age = 99, Name = "tako" });
 
 // bindable[0] = "takoyaki";
 
